@@ -7,7 +7,7 @@ interface Dataset {
 }
 
 export interface CleanResult {
-  meta: DatasetMeta & { cleaned: true }; 
+  meta: DatasetMeta & { cleaned: true };
   cleaned: Reading[];
   originalPrimary: Reading[];
   originalSecondary: Reading[];
