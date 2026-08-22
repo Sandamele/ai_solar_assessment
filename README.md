@@ -273,3 +273,7 @@ The spec separates validation into three checks. The original code only really i
 **Rule I'd add:** explicitly check whether a reading falls within the expected daylight period. Any meaningful output outside that window should be flagged, regardless of the neighboring values. The daylight window could come from the secondary series' day/night pattern, or from a solar-elevation calculation if the site's latitude and longitude are available.
 
 That would give the pipeline a proper day/night consistency check instead of relying on the outlier filter to catch these cases indirectly.
+
+## Chat logs
+
+https://chat.deepseek.com/share/jmfnbhoizz8by4b794
