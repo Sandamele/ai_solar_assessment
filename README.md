@@ -29,8 +29,8 @@ The pipeline:
 ## Installation
 
 ```bash
-git clone <repository>
-cd <project-folder>
+git clone [<repository>](https://github.com/Sandamele/ai_solar_assessment)
+cd ai_solar_assessment
 npm install
 ```
 
