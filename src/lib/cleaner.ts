@@ -1,4 +1,5 @@
-import { Reading } from "../../types";
+import { toZonedTime, format } from "date-fns-tz";
+import { DatasetMeta, Reading } from "../types";
 
 interface Dataset {
   meta: any;
@@ -6,17 +7,18 @@ interface Dataset {
 }
 
 export interface CleanResult {
-  meta: any;
+  meta: DatasetMeta & { cleaned: true }; 
   cleaned: Reading[];
   originalPrimary: Reading[];
   originalSecondary: Reading[];
   validation: {
     totalExpected: number;
-    present: number;
     missing: number;
     invalid: number;
     backfilledFromSecondary: number;
     interpolated: number;
+    forcedToZero: number;
+    present: number;
   };
 }
 
@@ -25,11 +27,25 @@ export function cleanPrimary(
   secondary: Dataset,
 ): CleanResult {
   const rating = primary.meta.system_rating_w;
-  const start = new Date(primary.meta.period_start);
-  const end = new Date(primary.meta.period_end);
-  const interval = primary.meta.interval_seconds; // 300
+  const timeZone = "Africa/Johannesburg";
+  const startStr = primary.meta.period_start;
+  const endStr = primary.meta.period_end;
+  const intervalSec = primary.meta.interval_seconds;
 
-  // ----- 1. Build primary map; detect duplicate timestamps -----
+  // 1. Generate correct local timestamps
+  const startDate = new Date(startStr);
+  const endDate = new Date(endStr);
+  const fullTimestamps: string[] = [];
+  let current = startDate;
+  while (current <= endDate) {
+    const zoned = toZonedTime(current, timeZone);
+    fullTimestamps.push(
+      format(zoned, "yyyy-MM-dd'T'HH:mm:ssXXX", { timeZone }),
+    );
+    current = new Date(current.getTime() + intervalSec * 1000);
+  }
+
+  // 2. Build primary map, detect duplicates
   const primaryMap = new Map<
     string,
     { value: number | null; duplicate: boolean }
@@ -43,7 +59,7 @@ export function cleanPrimary(
     }
   }
 
-  // ----- 2. Build secondary map (exact 30‑min anchors) -----
+  // 3. Build secondary map (only numeric values)
   const secondaryMap = new Map<string, number>();
   for (const r of secondary.readings) {
     if (r.power_w !== null && r.power_w !== undefined) {
@@ -51,21 +67,11 @@ export function cleanPrimary(
     }
   }
 
-  // ----- 3. Generate the full 5‑min timeline -----
-  const fullTimestamps: string[] = [];
-  let current = new Date(start);
-  while (current <= end) {
-    const iso = current.toISOString();
-    const local = iso.replace(".000Z", "+02:00").replace(/\.\d{3}/, "");
-    fullTimestamps.push(local);
-    current = new Date(current.getTime() + interval * 1000);
-  }
-
+  // 4. Initial pass: completeness & plausibility
   const cleanedValues: (number | null)[] = [];
   let missingCount = 0;
   let invalidCount = 0;
 
-  // ----- 4. Initial plausibility & completeness -----
   for (const ts of fullTimestamps) {
     const entry = primaryMap.get(ts);
     if (!entry) {
@@ -86,10 +92,9 @@ export function cleanPrimary(
     cleanedValues.push(val);
   }
 
-  // ----- 5. Outlier detection (spikes / dips) -----
-  const outlierThreshold = 0.3 * rating; // 720 W for a 2.4 kW system
-  const windowSize = 5; // number of 5‑min steps left/right
-
+  // 5. Outlier detection (spikes/dips) – marks more as invalid
+  const outlierThreshold = 0.3 * rating;
+  const windowSize = 5;
   for (let i = 0; i < cleanedValues.length; i++) {
     const val = cleanedValues[i];
     if (val === null) continue;
@@ -117,7 +122,7 @@ export function cleanPrimary(
     }
   }
 
-  // ----- 6. Backfill gaps from secondary (exact 30‑min anchors) -----
+  // 6. Backfill from secondary (only on exact 30‑min anchors)
   let backfilledCount = 0;
   for (let i = 0; i < cleanedValues.length; i++) {
     if (cleanedValues[i] !== null) continue;
@@ -128,7 +133,7 @@ export function cleanPrimary(
     }
   }
 
-  // ----- 7. Linear interpolation for remaining nulls -----
+  // 7. Linear interpolation for remaining nulls
   let interpolatedCount = 0;
   let startNull = -1;
   for (let i = 0; i < cleanedValues.length; i++) {
@@ -157,7 +162,7 @@ export function cleanPrimary(
     }
   }
 
-  // Handle edge nulls (fill with nearest value)
+  // Edge nulls: fill with nearest neighbour (no interpolation possible)
   if (cleanedValues[0] === null) {
     let next = 1;
     while (next < cleanedValues.length && cleanedValues[next] === null) next++;
@@ -174,14 +179,27 @@ export function cleanPrimary(
     }
   }
 
-  // ----- 8. Build final cleaned readings (round to 1 decimal) -----
-  const cleanedReadings: Reading[] = fullTimestamps.map((ts, i) => ({
-    timestamp: ts,
-    power_w:
-      cleanedValues[i] !== null ? Math.round(cleanedValues[i]! * 10) / 10 : 0,
-  }));
+  // 8. Build final cleaned readings, count forced‑to‑zero
+  const cleanedReadings: Reading[] = [];
+  let forcedToZero = 0;
 
-  const presentCount = cleanedReadings.filter((r) => r.power_w !== null).length;
+  for (let i = 0; i < cleanedValues.length; i++) {
+    const val = cleanedValues[i];
+    if (val === null) {
+      forcedToZero++;
+      cleanedReadings.push({
+        timestamp: fullTimestamps[i],
+        power_w: 0,
+      });
+    } else {
+      cleanedReadings.push({
+        timestamp: fullTimestamps[i],
+        power_w: Math.round(val * 10) / 10,
+      });
+    }
+  }
+  const totalExpected = fullTimestamps.length;
+  const present = totalExpected - forcedToZero;
 
   return {
     meta: { ...primary.meta, cleaned: true },
@@ -189,12 +207,13 @@ export function cleanPrimary(
     originalPrimary: primary.readings,
     originalSecondary: secondary.readings,
     validation: {
-      totalExpected: fullTimestamps.length,
-      present: presentCount,
+      totalExpected,
       missing: missingCount,
       invalid: invalidCount,
       backfilledFromSecondary: backfilledCount,
       interpolated: interpolatedCount,
+      forcedToZero,
+      present,
     },
   };
 }
